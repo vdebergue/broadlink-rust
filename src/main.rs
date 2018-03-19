@@ -1,14 +1,18 @@
 use std::net::{UdpSocket, Ipv4Addr, IpAddr, SocketAddr};
 use std::time::Duration;
 extern crate time;
-extern crate crypto;
+extern crate openssl;
 
 fn main() {
     println!("Hello, world!");
     let local_ip = get_local_ip();
     println!("Got local ip: {}", local_ip);
     match local_ip {
-        IpAddr::V4(ip) => discover(ip, Some(Duration::from_secs(5))),
+        IpAddr::V4(ip) => {
+          let mut device = discover(ip, Some(Duration::from_secs(5)));
+          device.auth();
+          device.check_power();
+        },
         _ => println!("no ipv4"),
     }
 
@@ -21,7 +25,7 @@ fn get_local_ip() -> IpAddr {
     addr.ip()
 }
 
-fn discover(local_ip: Ipv4Addr, timeout: Option<Duration>) {
+fn discover(local_ip: Ipv4Addr, timeout: Option<Duration>) -> SP2 {
   let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(local_ip), 0)).expect("bind failed");
   socket.set_broadcast(true).expect("set_broadcast failed");
 
@@ -37,7 +41,7 @@ fn discover(local_ip: Ipv4Addr, timeout: Option<Duration>) {
 
   let device = gendevice(src, &buf);
   println!("Got device {:?}", device);
-
+  device
 }
 
 fn gendevice(src: SocketAddr, response: &[u8]) -> SP2 {
@@ -55,17 +59,17 @@ fn gendevice(src: SocketAddr, response: &[u8]) -> SP2 {
 
 fn hello_packet(local_ip: Ipv4Addr, port: u16) -> [u8; 0x30] {
     let now = time::now();
-    let timezoneOffset: i32 = now.tm_utcoff / 3600 * -1;
+    let timezone_offset: i32 = now.tm_utcoff / 3600 * -1;
     let mut packet: [u8; 0x30] = [0; 0x30];
-    if (timezoneOffset < 0) {
-        packet[0x08] = (0xff + (timezoneOffset) - 1) as u8;
+    if timezone_offset < 0 {
+        packet[0x08] = (0xff + (timezone_offset) - 1) as u8;
         packet[0x09] = 0xff;
         packet[0x0a] = 0xff;
         packet[0x0b] = 0xff;
     } else {
-        packet[0x08] = timezoneOffset as u8;
+        packet[0x08] = timezone_offset as u8;
     }
-    let year = (now.tm_year + 1900);
+    let year = now.tm_year + 1900;
     packet[0x0c] = (year & 0xff) as u8;
     packet[0x0d] = (year >> 8) as u8;
     packet[0x0e] = now.tm_min as u8;
@@ -93,8 +97,61 @@ fn hello_packet(local_ip: Ipv4Addr, port: u16) -> [u8; 0x30] {
 
 
 trait Device {
-  fn send_packet(&mut self, command: u8, payload: &[u8]) {
-    let mut packet: [u8; 0x38] = [0; 0x38];
+
+  fn auth(&mut self) {
+    let mut payload: [u8; 0x50] = [0; 0x50];
+    payload[0x04] = 0x31;
+    payload[0x05] = 0x31;
+    payload[0x06] = 0x31;
+    payload[0x07] = 0x31;
+    payload[0x08] = 0x31;
+    payload[0x09] = 0x31;
+    payload[0x0a] = 0x31;
+    payload[0x0b] = 0x31;
+    payload[0x0c] = 0x31;
+    payload[0x0d] = 0x31;
+    payload[0x0e] = 0x31;
+    payload[0x0f] = 0x31;
+    payload[0x10] = 0x31;
+    payload[0x11] = 0x31;
+    payload[0x12] = 0x31;
+    payload[0x1e] = 0x01;
+    payload[0x2d] = 0x01;
+    payload[0x30] = 'T' as u8;
+    payload[0x31] = 'e' as u8;
+    payload[0x32] = 's' as u8;
+    payload[0x33] = 't' as u8;
+    payload[0x34] = ' ' as u8;
+    payload[0x35] = ' ' as u8;
+    payload[0x36] = '1' as u8;
+
+    let response = self.send_packet(0x65, &payload);
+    let decrypted_payload = self.decrypt(&response[0x38..]);
+
+    let mut key = [0u8; 16];
+    let mut id = [0u8; 4];
+    key.clone_from_slice(&decrypted_payload[0x04..0x14]);
+    id.clone_from_slice(&decrypted_payload[0x00..0x04]);
+
+    self.device_info_mut().key = key;
+    self.device_info_mut().id = id;
+  }
+
+  fn send_packet(&mut self, command: u8, payload: &[u8]) -> Vec<u8> {
+    let packet = self.make_packet(command, payload);
+    let socket = &self.device_info().socket;
+    socket.send_to(&packet, self.device_info().addr).expect("couldn't send data");
+
+    let timeout = Some(Duration::from_secs(5));
+    socket.set_read_timeout(timeout).expect("set_read_timeout failed");
+    let mut buf = Vec::new();
+    //let mut buf = [0; 1024];
+    let (_, _) = socket.recv_from(&mut buf).expect("read failed");
+    buf
+  }
+
+  fn make_packet(&mut self, command: u8, payload: &[u8]) -> Vec<u8> {
+    let mut packet: Vec<u8> = Vec::with_capacity(0x38);
     self.device_info_mut().incr_count();
     packet[0x00] = 0x5a;
     packet[0x01] = 0xa5;
@@ -129,17 +186,30 @@ trait Device {
     packet[0x35] = (checksum >> 8) as u8;
 
     // encrypt payload
-    // let encrypted = self.encrypt(payload);
+    let encrypted_payload = self.encrypt(payload);
+    // append encrypted payload to packet
+    packet.extend_from_slice(&encrypted_payload);
 
+    // packet checksum
+    checksum = 0xbeaf;
+    for i in 0..packet.len() {
+      checksum += packet[i] as i32;
+    }
+    packet[0x20] = (checksum & 0xff) as u8;
+    packet[0x21] = (checksum >> 8) as u8;
+    packet
   }
 
-  fn encrypt(&self, payload: &[u8]) -> &[u8] {
-    let mut encryptor = crypto::aes::cbc_encryptor(
-      crypto::aes::KeySize::KeySize128,
-      &self.device_info().key,
-      &self.device_info().iv,
-      crypto::blockmodes::PkcsPadding
-    );
+  fn encrypt(&self, payload: &[u8]) -> Vec<u8> {
+    let cipher = openssl::symm::Cipher::aes_128_cbc();
+    let result = openssl::symm::encrypt(cipher, &self.device_info().key, Some(&self.device_info().iv), payload);
+    result.unwrap()
+  }
+
+  fn decrypt(&self, payload: &[u8]) -> Vec<u8> {
+    let cipher = openssl::symm::Cipher::aes_128_cbc();
+    let result = openssl::symm::decrypt(cipher, &self.device_info().key, Some(&self.device_info().iv), payload);
+    result.unwrap()
   }
 
   fn device_info(&self) -> &DeviceInfo;
@@ -153,17 +223,21 @@ struct DeviceInfo {
   count: u16,
   id: [u8; 4],
   iv: [u8; 16],
-  key: [u8; 16]
+  key: [u8; 16],
+  socket: UdpSocket
 }
 
 impl DeviceInfo {
   fn new(addr: SocketAddr, mac: [u8; 6]) -> DeviceInfo {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("Could not bind socket");
+    socket.set_broadcast(true).expect("Could not set broadcast");
     DeviceInfo {
       addr, mac,
       count: 0,
       id: [0; 4],
       iv: [0x56, 0x2e, 0x17, 0x99, 0x6d, 0x09, 0x3d, 0x28, 0xdd, 0xb3, 0xba, 0x69, 0x5a, 0x2e, 0x6f, 0x58],
-      key: [0x09, 0x76, 0x28, 0x34, 0x3f, 0xe9, 0x9e, 0x23, 0x76, 0x5c, 0x15, 0x13, 0xac, 0xcf, 0x8b, 0x02]
+      key: [0x09, 0x76, 0x28, 0x34, 0x3f, 0xe9, 0x9e, 0x23, 0x76, 0x5c, 0x15, 0x13, 0xac, 0xcf, 0x8b, 0x02],
+      socket
     }
   }
 
@@ -181,6 +255,16 @@ impl SP2 {
   fn new(addr: SocketAddr, mac: [u8; 6]) -> SP2 {
     SP2 {
       device_info: DeviceInfo::new(addr, mac)
+    }
+  }
+
+  fn check_power(&mut self) {
+    let mut payload: [u8; 16] = [0; 16];
+    payload[0] = 1;
+    let response = self.send_packet(0x6a, &payload);
+    let err = (response[0x22] as u16) | ((response[0x23] as u16) << 8);
+    if err == 0 {
+      let response_clear = self.decrypt(&response[0x38..]);
     }
   }
 }
