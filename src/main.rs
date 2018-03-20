@@ -258,13 +258,17 @@ impl SP2 {
     }
   }
 
-  fn check_power(&mut self) {
+  fn check_power(&mut self) -> Result<bool, &'static str> {
     let mut payload: [u8; 16] = [0; 16];
     payload[0] = 1;
     let response = self.send_packet(0x6a, &payload);
     let err = (response[0x22] as u16) | ((response[0x23] as u16) << 8);
     if err == 0 {
       let response_clear = self.decrypt(&response[0x38..]);
+      let status = response_clear[0x4];
+      Ok(status > 0)
+    } else {
+      Err("got error response")
     }
   }
 }
