@@ -126,15 +126,20 @@ trait Device {
     payload[0x36] = '1' as u8;
 
     let response = self.send_packet(0x65, &payload);
-    let decrypted_payload = self.decrypt(&response[0x38..]);
+    println!("Auth response len = {}: {:?}", response.len(), response);
 
-    let mut key = [0u8; 16];
-    let mut id = [0u8; 4];
-    key.clone_from_slice(&decrypted_payload[0x04..0x14]);
-    id.clone_from_slice(&decrypted_payload[0x00..0x04]);
+    if response.len() > 0x38 {
+      let decrypted_payload = self.decrypt(&response[0x38..]);
 
-    self.device_info_mut().key = key;
-    self.device_info_mut().id = id;
+      let mut key = [0u8; 16];
+      let mut id = [0u8; 4];
+      key.clone_from_slice(&decrypted_payload[0x04..0x14]);
+      id.clone_from_slice(&decrypted_payload[0x00..0x04]);
+
+      self.device_info_mut().key = key;
+      self.device_info_mut().id = id;
+    }
+    
   }
 
   fn send_packet(&mut self, command: u8, payload: &[u8]) -> Vec<u8> {
@@ -144,14 +149,19 @@ trait Device {
 
     let timeout = Some(Duration::from_secs(5));
     socket.set_read_timeout(timeout).expect("set_read_timeout failed");
-    let mut buf = Vec::new();
-    //let mut buf = [0; 1024];
-    let (_, _) = socket.recv_from(&mut buf).expect("read failed");
-    buf
+    let mut vec = Vec::new();
+    let mut buf = [0; 1024];
+    let (amt, _) = socket.recv_from(&mut buf).expect("read failed");
+    println!("Received {}: {:?}", amt, &buf[0..amt]);
+    vec.extend_from_slice(&buf[0..amt]);
+    vec
   }
 
   fn make_packet(&mut self, command: u8, payload: &[u8]) -> Vec<u8> {
     let mut packet: Vec<u8> = Vec::with_capacity(0x38);
+    for i in 0..0x38 {
+      packet.push(0u8);
+    }
     self.device_info_mut().incr_count();
     packet[0x00] = 0x5a;
     packet[0x01] = 0xa5;
@@ -207,8 +217,14 @@ trait Device {
   }
 
   fn decrypt(&self, payload: &[u8]) -> Vec<u8> {
+    println!("Decrypting {} {:?}", payload.len(), payload);
     let cipher = openssl::symm::Cipher::aes_128_cbc();
-    let result = openssl::symm::decrypt(cipher, &self.device_info().key, Some(&self.device_info().iv), payload);
+    let result = openssl::symm::decrypt(
+      cipher, 
+      &self.device_info().key, 
+      Some(&self.device_info().iv), 
+      payload
+    );
     result.unwrap()
   }
 
