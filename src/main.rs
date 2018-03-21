@@ -11,7 +11,8 @@ fn main() {
         IpAddr::V4(ip) => {
           let mut device = discover(ip, Some(Duration::from_secs(5)));
           device.auth();
-          device.check_power();
+          device.set_power(true);
+          //device.check_power();
         },
         _ => println!("no ipv4"),
     }
@@ -99,7 +100,7 @@ fn hello_packet(local_ip: Ipv4Addr, port: u16) -> [u8; 0x30] {
 trait Device {
 
   fn auth(&mut self) {
-    let mut payload: [u8; 0x50] = [0; 0x50];
+    let mut payload = [0u8; 0x50];
     payload[0x04] = 0x31;
     payload[0x05] = 0x31;
     payload[0x06] = 0x31;
@@ -138,6 +139,8 @@ trait Device {
 
       self.device_info_mut().key = key;
       self.device_info_mut().id = id;
+    } else {
+      println!("No response from device {:?} on auth request", self.device_info());
     }
     
   }
@@ -286,6 +289,13 @@ impl SP2 {
     } else {
       Err("got error response")
     }
+  }
+
+  fn set_power(&mut self, state: bool) {
+    let mut payload = [0u8; 16];
+    payload[0] = 2;
+    payload[4] = state as u8;
+    self.send_packet(0x6a, &payload);
   }
 }
 
