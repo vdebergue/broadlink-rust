@@ -140,7 +140,7 @@ trait Device {
       self.device_info_mut().key = key;
       self.device_info_mut().id = id;
     } else {
-      println!("No response from device {:?} on auth request", self.device_info());
+      println!("No response from device on auth request :(");
     }
     
   }
@@ -153,7 +153,7 @@ trait Device {
     let timeout = Some(Duration::from_secs(5));
     socket.set_read_timeout(timeout).expect("set_read_timeout failed");
     let mut vec = Vec::new();
-    let mut buf = [0; 1024];
+    let mut buf = [0; 2048];
     let (amt, _) = socket.recv_from(&mut buf).expect("read failed");
     println!("Received {}: {:?}", amt, &buf[0..amt]);
     vec.extend_from_slice(&buf[0..amt]);
@@ -161,10 +161,7 @@ trait Device {
   }
 
   fn make_packet(&mut self, command: u8, payload: &[u8]) -> Vec<u8> {
-    let mut packet: Vec<u8> = Vec::with_capacity(0x38);
-    for i in 0..0x38 {
-      packet.push(0u8);
-    }
+    let mut packet: Vec<u8> = vec![0u8; 0x38];
     self.device_info_mut().incr_count();
     packet[0x00] = 0x5a;
     packet[0x01] = 0xa5;
@@ -190,26 +187,35 @@ trait Device {
     packet[0x32] = self.device_info().id[2];
     packet[0x33] = self.device_info().id[3];
 
+    // pad the payload
+    let padded_payload: Vec<u8> =
+      if payload.len() > 0 {
+        let numpad = (payload.len() / 16 + 1) * 16;
+        let zeroes_to_add = numpad - payload.len();
+        let mut out: Vec<u8> = Vec::with_capacity(numpad);
+        for _ in 0..zeroes_to_add {
+          out.push(0u8);
+        }
+        out.extend_from_slice(payload);
+        out
+      } else {
+        Vec::new()
+      };
+
     // payload checksum
-    let mut checksum: i32 = 0xbeaf;
-    for i in 0..payload.len() {
-        checksum += payload[i] as i32;
-    }
-    packet[0x34] = (checksum & 0xff) as u8;
-    packet[0x35] = (checksum >> 8) as u8;
+    let payload_checksum = self.checksum(&padded_payload);
+    packet[0x34] = payload_checksum as u8;
+    packet[0x35] = (payload_checksum >> 8) as u8;
 
     // encrypt payload
-    let encrypted_payload = self.encrypt(payload);
+    let encrypted_payload = self.encrypt(&padded_payload);
     // append encrypted payload to packet
     packet.extend_from_slice(&encrypted_payload);
 
     // packet checksum
-    checksum = 0xbeaf;
-    for i in 0..packet.len() {
-      checksum += packet[i] as i32;
-    }
-    packet[0x20] = (checksum & 0xff) as u8;
-    packet[0x21] = (checksum >> 8) as u8;
+    let packet_checksum = self.checksum(&packet);
+    packet[0x20] = packet_checksum as u8;
+    packet[0x21] = (packet_checksum >> 8) as u8;
     packet
   }
 
@@ -229,6 +235,11 @@ trait Device {
       payload
     );
     result.unwrap()
+  }
+
+  fn checksum(&self, buffer: &[u8]) -> u16 {
+    let checksum: u32 = 0xbeaf;
+    buffer.iter().fold(checksum, |acc, &x| (acc + x as u32) & 0xffff) as u16
   }
 
   fn device_info(&self) -> &DeviceInfo;
